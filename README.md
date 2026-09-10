@@ -1,327 +1,511 @@
-# API Gateway
+# Notification Backend System
 
-The API Gateway is the public HTTP entry point for the backend. The frontend sends requests to the gateway, and the gateway forwards authentication requests to the Auth Service.
+A Docker Compose microservices backend containing an API Gateway, an Auth Service, and a Notification Service.
+
+The system currently implements two connected flows:
+
+1. Frontend HTTP requests go through the API Gateway to the Auth Service.
+2. After successful signup and OTP verification, Auth publishes a `user.created` event through NATS JetStream. Notification Service consumes it and sends a welcome email.
+
+## Architecture
 
 ```text
 Frontend
    |
-   | HTTP requests on port 4000
+   | HTTP :4000
    v
 API Gateway
    |
-   | /api/auth/* requests are proxied
+   | HTTP proxy: /api/auth/*
    v
-Auth Service on port 3001
+Auth Service :3001
+   |
+   | MongoDB, Redis
+   |
+   | after successful OTP verification
+   v
+NATS JetStream :4222
+   |
+   | user.created
+   v
+Notification Service
+   |
+   | Nodemailer / SMTP
+   v
+Welcome Email
 ```
 
-## What Is Implemented
-
-The current gateway provides:
-
-- Auth Service proxying through `/api/auth`
-- CORS configuration for the frontend
-- A health endpoint at `/health`
-- JSON responses for unknown routes
-- Upstream timeout handling
-- A `502 Bad Gateway` response when the Auth Service cannot be reached
-
-The Notification Service is a background NATS worker. It does not have HTTP routes and is not called through this gateway.
-
-## Important Terms
+## Services
 
 ### API Gateway
 
-A single HTTP entry point used by clients before requests reach internal backend services. It can route requests, apply cross-origin rules, handle errors, and hide internal service addresses from the frontend.
+The public HTTP entry point for the frontend. It runs on port `4000` and proxies authentication requests to Auth Service.
 
-### Service
+Responsibilities:
 
-An independently running backend application. This project has an Auth Service, an API Gateway, and a Notification Service, along with MongoDB, Redis, and NATS infrastructure.
+- Accept frontend HTTP requests.
+- Apply CORS rules.
+- Forward `/api/auth/*` requests.
+- Rewrite public paths into Auth Service paths.
+- Return a health response from `/health`.
+- Return `404` for unknown gateway routes.
+- Return `502 Bad Gateway` when Auth Service is unavailable.
+
+The gateway does not send emails, access MongoDB, consume NATS events, or implement notification logic.
+
+### Auth Service
+
+The user-facing authentication service. It runs on port `3001` and owns user creation, login, cookies, OTP verification, password operations, and OAuth routes.
+
+Responsibilities:
+
+- Start the Express HTTP server.
+- Connect to MongoDB.
+- Connect to Redis.
+- Connect to NATS JetStream.
+- Begin signup and store temporary signup data and OTP values.
+- Verify the signup OTP.
+- Create the user only after successful verification.
+- Publish `user.created` only after successful user creation and update/save operations.
+- Never publish `user.created` during normal login.
+
+### Notification Service
+
+The Notification Service is a background worker, not an HTTP API. It does not expose port `6000` and does not have REST routes.
+
+Responsibilities:
+
+- Connect to NATS JetStream.
+- Ensure the `USER_EVENTS` stream exists.
+- Ensure the durable `notification-worker` consumer exists.
+- Consume `user.created` messages.
+- Validate event data.
+- Send one generic welcome email.
+- ACK only after the email is sent successfully.
+- Leave failed messages unacknowledged so JetStream can redeliver them.
+- Shut down gracefully on `SIGINT` and `SIGTERM`.
+
+Only this notification is implemented currently:
+
+```text
+user.created -> welcome email
+```
+
+SMS, push notifications, password reset notifications, OTP notifications, and generic notification types are not implemented in Notification Service.
+
+## Infrastructure Services
+
+### MongoDB
+
+MongoDB is the persistent document database used by Auth Service for user records. The configured database name is `Notifyme`.
+
+Docker Compose exposes MongoDB on host port `27017` and stores data in the `mongo-data` named volume.
+
+### Redis
+
+Redis is the temporary key-value store used by Auth Service for signup data and OTP values with expiration times.
+
+Examples of temporary data:
+
+```text
+signup:user:<email>
+signup:otp:<email>
+forget:otp:<email>
+verify:forgetotp:<email>
+```
+
+Inside Docker, services connect to `redis://redis:6379`. They must not use `localhost` for container-to-container Redis communication.
+
+### NATS
+
+NATS is the messaging system used for communication between Auth Service and Notification Service. NATS runs with JetStream enabled using `command: ["-js"]`.
+
+The NATS client URL inside Docker is:
+
+```text
+nats://nats:4222
+```
+
+### NATS JetStream
+
+JetStream is the durable messaging layer built into NATS. Unlike plain Core NATS publish/subscribe, JetStream stores messages and supports durable consumers, acknowledgements, redelivery, and delivery limits.
+
+This project uses JetStream because a welcome email event must not disappear if Notification Service is temporarily unavailable.
+
+### SMTP
+
+SMTP is the email delivery protocol used by Nodemailer. Gmail SMTP is configured through environment variables. Credentials are never hardcoded in source code or Dockerfiles.
+
+### Docker Compose
+
+Docker Compose runs the backend services together and provides a private network where service names resolve to containers.
+
+Compose service names include:
+
+```text
+mongo
+redis
+nats
+auth-service
+api-gateway
+notify-service
+```
+
+For example, the gateway reaches Auth at `http://auth-service:3001`, and Auth reaches Redis at `redis://redis:6379`.
+
+## Important Terms
+
+### Microservice
+
+An independently running application that owns a focused responsibility. Auth and Notification Service can be built, restarted, and scaled separately.
+
+### API Gateway
+
+A single public HTTP entry point that routes client requests to internal services. It hides internal service addresses from the frontend.
 
 ### Reverse Proxy
 
-A server that receives a client request and forwards it to another server. In this project, the gateway receives `/api/auth/...` and forwards it to the Auth Service.
+A server that receives a request and forwards it to another server. The API Gateway is a reverse proxy for Auth Service.
 
 ### Upstream Service
 
-The internal service that receives a proxied request. The Auth Service is the upstream service for this gateway.
-
-Inside Docker, the gateway uses:
-
-```text
-http://auth-service:3001
-```
-
-`auth-service` is the Docker Compose service name. Containers communicate using service names, not `localhost`.
+The internal destination of a proxied request. In this project, Auth Service is the gateway's upstream service.
 
 ### Route
 
-A URL pattern handled by the application. For example:
-
-```text
-GET /health
-POST /api/auth/signup
-POST /api/auth/login
-```
+A URL and HTTP method handled by a service, such as `POST /login`.
 
 ### Route Prefix
 
-A common URL beginning shared by a group of routes. The gateway mounts the Auth proxy at:
-
-```text
-/api/auth
-```
-
-Everything below this prefix is forwarded to the Auth Service.
+A shared URL beginning for related routes. The gateway exposes Auth routes below `/api/auth`.
 
 ### Path Rewrite
 
-The gateway changes a public URL into the internal URL expected by the Auth Service.
+Changing a public path into the internal path expected by the destination service.
 
-Examples:
-
-| Public gateway URL | Auth Service URL |
+| Public URL | Auth Service URL |
 | --- | --- |
 | `/api/auth/signup` | `/signup` |
 | `/api/auth/login` | `/login` |
 | `/api/auth/verify` | `/verify` |
 | `/api/auth/oauth/google` | `/oauth/google` |
-| `/api/auth/oauth/google/callback` | `/oauth/google/callback` |
-
-The rewrite allows the frontend to use one consistent public prefix while the Auth Service keeps its own internal routes.
 
 ### CORS
 
-CORS means Cross-Origin Resource Sharing. Browsers use it to decide whether a frontend running on one origin can call a backend running on another origin.
+Cross-Origin Resource Sharing. It controls which browser origins may call the gateway. The current configuration allows the local frontend at ports `3000` and `4000` and allows cookies.
 
-The gateway currently allows these frontend origins:
+### Cookie
 
-- `http://localhost:3000`
-- `http://127.0.0.1:3000`
+A browser-managed value used here for access and refresh authentication tokens. The gateway allows credentialed requests so authentication cookies can travel between the frontend and backend.
 
-Credentials are enabled so browser cookies, including authentication cookies, can be sent with requests.
+### OTP
 
-### Proxy Timeout
+One-Time Password. Auth sends a temporary verification code during signup. The user must provide the correct, unexpired code before the account is created.
 
-The gateway waits up to 60 seconds for the Auth Service to respond. If the Auth Service does not respond in time, the proxy request fails instead of waiting forever.
+### Authentication
 
-### HTTP 502 Bad Gateway
+The process of proving a user's identity, including password login, signup OTP verification, refresh tokens, and Google OAuth.
 
-A `502` response means the gateway could not receive a valid response from the upstream Auth Service. It usually indicates that the Auth Service is stopped, unreachable, or unavailable.
+### Access Token
 
-### Health Check
+A short-lived token used to authenticate API requests.
 
-The health endpoint confirms that the gateway process is running:
+### Refresh Token
 
-```http
-GET /health
-```
+A longer-lived token used to obtain or maintain access after an access token expires.
 
-Example response:
+### Middleware
+
+Code that runs during request processing before the final route handler. Examples in Auth include authentication checks, refresh-token checks, rate limiting, CORS, and cookie parsing.
+
+### Rate Limiting
+
+Restricting how frequently a client can call selected routes. Auth applies rate limiting to protect authentication endpoints.
+
+### Event
+
+A message describing something that happened. Auth publishes a `user.created` event after a verified user has been saved.
+
+### Event Subject
+
+The NATS routing name used to publish and consume an event. This project uses `user.created`.
+
+### Event Payload
+
+The JSON data carried by the event:
 
 ```json
 {
-  "success": true,
-  "message": "API Gateway is running",
-  "port": 4000,
-  "targets": {
-    "auth": "http://localhost:3001"
-  }
+  "eventId": "unique-id",
+  "eventType": "user.created",
+  "timestamp": "ISO timestamp",
+  "userId": "user-id",
+  "name": "user-name",
+  "email": "user-email"
 }
 ```
 
-The displayed target is informational. Inside Docker, the actual default target is `http://auth-service:3001`.
+### Publisher
 
-## Project Structure
+The component that sends an event. Auth's `publishUserCreated(user)` function publishes to JetStream using `js.publish()`.
+
+### Consumer
+
+The component that reads events. Notification Service uses a durable consumer named `notification-worker`.
+
+### Stream
+
+A JetStream storage definition containing messages for one or more subjects. This project uses:
 
 ```text
-api-gateway/
-├── index.js                 # Starts Express and defines gateway-level routes
-├── routes/
-│   └── auth.routes.js       # Proxies authentication requests to Auth Service
-├── package.json             # Dependencies and start scripts
-├── package-lock.json        # Locked dependency versions
-├── dockerfile               # Docker image definition
-├── .dockerignore            # Files excluded from the Docker build context
-├── .env                    # Local environment values; do not commit secrets
-├── .gitignore              # Local ignore rules
-├── config/                 # Reserved for future gateway configuration
-├── middleware/             # Reserved for future gateway middleware
-└── utils/                  # Reserved for future shared gateway utilities
+Stream: USER_EVENTS
+Subject: user.created
+Storage: file
+Retention: limits
 ```
 
-## Main Files
+### Durable Consumer
 
-### `index.js`
+A named consumer whose position survives restarts. The durable name is `notification-worker`.
 
-This is the gateway entrypoint. It:
+### Explicit ACK
 
-1. Loads environment variables with `dotenv`.
-2. Creates the Express application.
-3. Configures CORS.
-4. Mounts the Auth proxy at `/api/auth`.
-5. Exposes `/health`.
-6. Returns JSON for unknown routes.
-7. Listens on `0.0.0.0` and the configured port.
+An explicit acknowledgement tells JetStream that a consumer successfully processed a message. Notification Service calls `message.ack()` only after `sendWelcomeEmail()` succeeds.
 
-### `routes/auth.routes.js`
+### Redelivery
 
-This file uses `http-proxy-middleware` to forward Auth requests. It defines:
+If a message is not acknowledged before the acknowledgement wait expires, JetStream sends it again. Email failures intentionally leave messages unacknowledged.
 
-- The Auth Service target URL
-- Origin handling with `changeOrigin`
-- Request and proxy timeouts
-- Public-to-internal path rewriting
-- A proxy error response
+### Maximum Delivery Count
 
-### `package.json`
+The maximum number of delivery attempts for a message. The notification consumer is configured with `max_deliver: 5`.
 
-Important dependencies:
+### Nodemailer
 
-| Package | Purpose |
-| --- | --- |
-| `express` | HTTP server and routing framework |
-| `cors` | Configures browser cross-origin access |
-| `dotenv` | Loads environment variables |
-| `http-proxy-middleware` | Forwards requests to Auth Service |
-| `nodemon` | Restarts the service during development |
+The Node.js library used by Notification Service and Auth Service to send email through SMTP.
+
+### Graceful Shutdown
+
+A controlled shutdown that drains the NATS connection and exits cleanly when Docker sends `SIGTERM` or the process receives `SIGINT`.
+
+### Environment Variable
+
+A configuration value supplied outside source code. Examples include `NATS_URL`, `MONGODB_URI`, `EMAIL_USER`, and `EMAIL_PASS`.
+
+## Repository Structure
+
+```text
+trams/
+├── api-gateway/
+│   ├── index.js
+│   ├── routes/auth.routes.js
+│   ├── package.json
+│   └── dockerfile
+├── auth/
+│   ├── index.js
+│   ├── app.js
+│   ├── controller/user.js
+│   ├── models/users.js
+│   ├── routes/
+│   ├── middleware/
+│   ├── services/
+│   ├── nats/publisher.js
+│   └── dockerfile
+├── NotifyService/
+│   ├── app.js
+│   ├── config/nats.js
+│   ├── controllers/userCreated.controller.js
+│   ├── services/email.service.js
+│   ├── package.json
+│   └── Dockerfile
+├── docker-compose.yml
+├── .env.example
+└── README.md
+```
 
 ## Environment Variables
 
-The gateway uses these values in `api-gateway/.env`:
+Never commit real `.env` files. Use the example files as templates.
+
+Common values:
+
+```env
+NODE_ENV=production
+NATS_URL=nats://nats:4222
+MONGODB_URI=mongodb://mongo:27017/Notifyme
+REDIS_URL=redis://redis:6379
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+EMAIL_USER=your-email@example.com
+EMAIL_PASS=your-app-password
+```
+
+Gateway values:
 
 ```env
 PORT=4000
 AUTH_SERVICE_URL=http://auth-service:3001
 ```
 
-### `PORT`
+When a service runs directly on the host instead of inside Docker, `localhost` may be used for local dependencies. Inside Docker, use Compose service names such as `mongo`, `redis`, `nats`, and `auth-service`.
 
-The port where the gateway listens. The Docker Compose configuration publishes port `4000`.
+## HTTP Flow: Signup and Login
 
-### `AUTH_SERVICE_URL`
-
-The internal Auth Service address used by the proxy.
-
-Docker value:
-
-```env
-AUTH_SERVICE_URL=http://auth-service:3001
-```
-
-Local value, when Auth Service runs directly on the host:
-
-```env
-AUTH_SERVICE_URL=http://localhost:3001
-```
-
-Do not put SMTP credentials, database credentials, or NATS credentials in this service. The gateway does not send email, access MongoDB, or consume NATS events.
-
-## Running Locally
-
-From the `api-gateway` directory:
-
-```powershell
-npm install
-npm run dev
-```
-
-The gateway will be available at:
+### Signup and OTP Verification
 
 ```text
-http://localhost:4000
+1. Frontend sends POST /api/auth/signup to API Gateway.
+2. Gateway rewrites and forwards the request to Auth Service /signup.
+3. Auth stores temporary signup data and an OTP in Redis.
+4. Auth sends the OTP email.
+5. Frontend sends POST /api/auth/verify.
+6. Gateway forwards the request to Auth Service /verify.
+7. Auth validates the OTP.
+8. Auth creates and saves the user in MongoDB.
+9. Auth publishes user.created to NATS JetStream.
+10. Auth returns the successful signup response.
 ```
 
-Start the Auth Service separately when testing proxied routes.
+### Normal Login
 
-## Running With Docker Compose
+```text
+1. Frontend sends POST /api/auth/login to API Gateway.
+2. Gateway forwards the request to Auth Service /login.
+3. Auth verifies the username and password.
+4. Auth creates access and refresh cookies.
+5. Auth returns the login response.
+```
+
+Normal login does not publish `user.created`.
+
+## Event Flow: Welcome Email
+
+```text
+Auth Service
+  |
+  | js.publish("user.created", encoded JSON)
+  v
+NATS JetStream
+  |
+  | USER_EVENTS / notification-worker
+  v
+Notification Service
+  |
+  | parse and validate JSON
+  v
+Nodemailer / SMTP
+  |
+  | successful email
+  v
+message.ack()
+```
+
+If JSON is malformed, the event is invalid, or SMTP sending fails, the consumer logs the error and does not ACK the message. JetStream can then redeliver it, up to the configured delivery limit.
+
+## Running the System
 
 From the repository root:
 
 ```powershell
-docker compose up -d --build api-gateway auth-service
+docker compose up -d --build
 ```
 
-The gateway is available at:
+Check service status:
 
-```text
-http://localhost:4000
+```powershell
+docker compose ps
 ```
 
-Check the gateway health endpoint:
+View logs:
+
+```powershell
+docker compose logs -f api-gateway
+docker compose logs -f auth-service
+docker compose logs -f notify-service
+```
+
+Check the gateway:
 
 ```powershell
 Invoke-RestMethod http://localhost:4000/health
 ```
 
-View gateway logs:
+Stop the system:
 
 ```powershell
-docker compose logs -f api-gateway
+docker compose down
 ```
 
-## Testing Auth Through the Gateway
+Stop the system and remove named data volumes:
 
-The frontend should call the gateway, not the Auth Service directly:
-
-```text
-POST http://localhost:4000/api/auth/signup
-POST http://localhost:4000/api/auth/login
-POST http://localhost:4000/api/auth/verify
-POST http://localhost:4000/api/auth/resend
-POST http://localhost:4000/api/auth/logout
+```powershell
+docker compose down -v
 ```
 
-The gateway forwards these requests to the Auth Service and preserves the request method, body, headers, and response.
+The `-v` option deletes MongoDB, Redis, and NATS stored data. Use it only when that data can be discarded.
 
-## Error Behavior
+## Troubleshooting
 
-### Unknown Gateway Route
+### `Cannot find module 'nats'`
 
-```json
-{
-  "success": false,
-  "message": "Route GET /unknown not found on API Gateway"
-}
+Confirm `nats` is listed in `auth/package.json`, then rebuild:
+
+```powershell
+docker compose up -d --build auth-service
 ```
 
-This returns HTTP `404`.
+### Redis connects to `127.0.0.1`
 
-### Auth Service Unavailable
+Inside Docker, use:
 
-```json
-{
-  "success": false,
-  "message": "Auth service is currently unreachable via API Gateway.",
-  "error": "..."
-}
+```env
+REDIS_URL=redis://redis:6379
 ```
 
-This returns HTTP `502`.
+### NATS does not connect
 
-## Request Flow Example
+Confirm NATS is running with JetStream enabled and that services use:
 
-For a login request:
-
-```text
-1. Frontend sends POST /api/auth/login to port 4000.
-2. API Gateway matches the /api/auth route.
-3. The gateway rewrites the path to /login.
-4. The gateway forwards the request to http://auth-service:3001/login.
-5. Auth Service validates the login.
-6. Auth Service returns the response.
-7. API Gateway returns that response to the frontend.
+```env
+NATS_URL=nats://nats:4222
 ```
 
-For account creation and welcome email delivery:
+### SMTP returns `535 BadCredentials`
 
-```text
-Frontend
-  -> API Gateway
-  -> Auth Service signup
-  -> OTP verification
-  -> Auth Service publishes user.created to NATS JetStream
-  -> Notification Service consumes the event
-  -> Nodemailer sends the welcome email
+Use a valid SMTP account and app password in `.env`. Do not put credentials in source code or Dockerfiles. Recreate the affected service after changing environment values:
+
+```powershell
+docker compose up -d --build auth-service notify-service
 ```
 
-The gateway only handles the HTTP part of this flow. It does not publish or consume the notification event.
+### Docker says a container name is already in use
+
+List containers:
+
+```powershell
+docker ps -a
+```
+
+Stop and remove only the old conflicting container, then retry Compose. Avoid deleting containers that belong to another active project unless you know they are no longer needed.
+
+## Current Scope
+
+Implemented:
+
+- Auth HTTP routes through the API Gateway
+- MongoDB user persistence
+- Redis signup and OTP state
+- NATS JetStream event publishing
+- Durable JetStream event consumption
+- Generic welcome email delivery
+- Docker Compose deployment
+
+Not implemented yet:
+
+- SMS notifications
+- Push notifications
+- Password reset notification events
+- OTP notification events from Notification Service
+- Notification database persistence
+- Kafka communication
+- Notification Service REST API
