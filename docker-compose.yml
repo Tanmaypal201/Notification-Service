@@ -1,0 +1,72 @@
+services:
+
+  mongo:
+    image: mongo:latest
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  redis:
+    image: redis:latest
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  nats:
+    image: nats:latest
+    restart: always
+    command: ["-js"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+
+  auth-service:
+    build:
+      context: ./auth
+      dockerfile: dockerfile
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    depends_on:
+      - mongo
+      - redis
+      - nats
+    env_file:
+      - .env
+      - ./auth/.env
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: dockerfile
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    depends_on:
+      - auth-service
+    env_file:
+      - .env
+      - ./NotifyService/.env
+
+  notify-service:
+    container_name: notify-service
+    build:
+      context: ./NotifyService
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - nats
+    env_file:
+      - .env
+      - ./NotifyService/.env
+
+volumes:
+  mongo-data:
+  redis-data:
+  nats-data:
