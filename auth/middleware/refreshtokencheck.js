@@ -33,7 +33,7 @@ const checkRefreshToken = async (req, res) => {
             });
         }
 
-        const accessToken = generateAccessToken(user);
+        const accessToken = generateAccessToken(user, user.role);
         const isProduction = process.env.NODE_ENV === "production";
 
         res.cookie("accessToken", accessToken, {
