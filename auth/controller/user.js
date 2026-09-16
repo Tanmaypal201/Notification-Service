@@ -83,9 +83,9 @@ const loginuser = async (req, res) => {
             return res.status(400).json({ message: "Invalid password" });
         }
 
-        const accessToken = generateAccessToken(existingUser);
-        const refreshToken = generateRefreshToken(existingUser);
-        await User.findOneAndUpdate({ _id: existingUser._id }, { refreshToken });
+        const accessToken = generateAccessToken(existingUser, "user");
+        const refreshToken = generateRefreshToken(existingUser, "user");
+        await User.findOneAndUpdate({ _id: existingUser._id }, { refreshToken, role: "user" });
 
         res.cookie("accessToken", accessToken, cookieOptions(ACCESS_TOKEN_MAX_AGE));
         res.cookie("refreshToken", refreshToken, cookieOptions(REFRESH_TOKEN_MAX_AGE));
@@ -123,9 +123,9 @@ const verficationcode = async (req, res) => {
         const parsedUser = JSON.parse(userJson);
         const newUser = await User.create(parsedUser);
 
-        const accessToken = generateAccessToken(newUser);
-        const refreshToken = generateRefreshToken(newUser);
-        await User.findOneAndUpdate({ _id: newUser._id }, { refreshToken });
+        const accessToken = generateAccessToken(newUser, "user");
+        const refreshToken = generateRefreshToken(newUser, "user");
+        await User.findOneAndUpdate({ _id: newUser._id }, { refreshToken, role: "user" });
 
         res.cookie("accessToken", accessToken, cookieOptions(ACCESS_TOKEN_MAX_AGE));
         res.cookie("refreshToken", refreshToken, cookieOptions(REFRESH_TOKEN_MAX_AGE));
@@ -302,7 +302,7 @@ const loginwithgooleController = async (profile) => {
     return user;
 };
 
-const profile= async(req,res)=>{
+const profile = async (req, res) => {
     try {
         const userId = req.user?._id;
         const user = await User.findById(userId).select("username email profilepicture");
@@ -315,4 +315,4 @@ const profile= async(req,res)=>{
     }
 }
 
-module.exports = { signupuser, loginuser, verficationcode, resendotp, forgetpassword, verifyforgetotp, updatepassword, logoutuser, loginwithgooleController , profile };
+module.exports = { signupuser, loginuser, verficationcode, resendotp, forgetpassword, verifyforgetotp, updatepassword, logoutuser, loginwithgooleController, profile };

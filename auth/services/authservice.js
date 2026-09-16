@@ -2,28 +2,33 @@ const Jwt = require("jsonwebtoken");
 const ACCESS_TOKEN_SECRET = "Snehamay&1014";
 const REFRESH_TOKEN_SECRET = "Snehamay&1014";
 
-const generateAccessToken = (user) => {
+const generateAccessToken = (user, role) => {
     if (!user) {
         throw new Error("User object is required");
     }
+    const resolvedRole = role || user.role || "user";
     return Jwt.sign(
         {
             _id: user._id,
             username: user.username,
             email: user.email,
+            role: resolvedRole
         }, ACCESS_TOKEN_SECRET,
         { expiresIn: "15m", }
     );
 };
 
-const generateRefreshToken = (user) => {
+const generateRefreshToken = (user, role) => {
     if (!user) {
         throw new Error("User object is required");
     }
+    const resolvedRole = role || user.role || "user";
     return Jwt.sign(
         { _id: user._id },
         REFRESH_TOKEN_SECRET,
-        { expiresIn: "7d", }
+        {
+            expiresIn: resolvedRole === "admin" ? "1d" : "7d"
+        }
     );
 };
 

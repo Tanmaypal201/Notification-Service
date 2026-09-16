@@ -24,7 +24,12 @@ const UserSchema = new mongoose.Schema({
     "refreshToken": {
         type: String,
         require: false
-    }
+    },
+    "role": {
+        type: String,
+        enum: ["user", "admin"],
+        default: "user",
+    },
 }, { timestamps: true })
 
 const User = mongoose.model("users", UserSchema);

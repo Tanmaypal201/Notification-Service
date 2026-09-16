@@ -225,4 +225,114 @@ const sendForget = async (email, verificationCode) => {
     }
 };
 
-module.exports = { sendVerify, sendForget };
+const sendVerifyAdmin = async (email, token) => {
+    try {
+        const baseUrl = process.env.BASE_URL || "http://localhost:3001";
+        const verifyLink = process.env.ADMIN_VERIFY_URL 
+            ? `${process.env.ADMIN_VERIFY_URL.replace(/\/$/, "")}/${token}`
+            : `${baseUrl.replace(/\/$/, "")}/admin/verify/${token}`;
+
+        const info = await transporter.sendMail({
+            from: `"EventoNato Admin" <${process.env.EMAIL_USER}>`,
+            to: email,
+            subject: "Verify your Admin Login",
+
+            text: `Click this link to verify your admin login: ${verifyLink}
+            
+This link will expire in 5 minutes.`,
+
+            html: `
+            <div style="
+                font-family: Arial, sans-serif;
+                max-width: 600px;
+                margin: 0 auto;
+                padding: 24px;
+                background-color: #0d0d0f;
+                border-radius: 12px;
+                color: #f2efe9;
+            ">
+
+                <h2 style="
+                    color: #e02434;
+                    margin-bottom: 16px;
+                ">
+                    Verify Admin Login
+                </h2>
+
+                <p style="
+                    font-size: 15px;
+                    color: #c4b5b0;
+                    line-height: 1.5;
+                ">
+                    We received a request to log in to your admin account.
+                    Click the button below to verify your identity and continue.
+                </p>
+
+                <div style="
+                    text-align: center;
+                    margin: 30px 0;
+                ">
+                    <a
+                        href="${verifyLink}"
+                        style="
+                            display: inline-block;
+                            padding: 14px 28px;
+                            background-color: #e02434;
+                            color: #ffffff;
+                            text-decoration: none;
+                            border-radius: 8px;
+                            font-size: 16px;
+                            font-weight: bold;
+                        "
+                    >
+                        Verify Admin Login
+                    </a>
+                </div>
+
+                <p style="
+                    font-size: 13px;
+                    color: #887b76;
+                    line-height: 1.5;
+                ">
+                    This verification link will expire in
+                    <strong>5 minutes</strong>.
+                </p>
+
+                <p style="
+                    font-size: 13px;
+                    color: #887b76;
+                    line-height: 1.5;
+                ">
+                    If you did not attempt to log in, you can safely ignore
+                    this email.
+                </p>
+
+                <hr style="
+                    border: none;
+                    border-top: 1px solid #2e282a;
+                    margin: 24px 0;
+                " />
+
+                <p style="
+                    font-size: 11px;
+                    color: #6b615d;
+                    text-align: center;
+                ">
+                    &copy; ${new Date().getFullYear()} EventoNato.
+                    All rights reserved.
+                </p>
+
+            </div>
+            `,
+        });
+
+        console.log("Admin verification email sent:", info.messageId);
+
+        return info;
+
+    } catch (err) {
+        console.error("Error sending admin verification email:", err);
+        throw err;
+    }
+};
+module.exports = { sendVerify, sendForget, sendVerifyAdmin };
